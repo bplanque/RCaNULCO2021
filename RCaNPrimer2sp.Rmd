@@ -1,0 +1,167 @@
+---
+title: "RCaN - a primer with 2 species"
+author: "Benjamin Planque"
+date: "2021"
+output: 
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## A Primer for running Chance and Necessity (CaN) models in R
+
+Benjamin Planque - 2021
+
+*Institute of Marine Research. P.O, Box 6606 Langnes, 9296 Tromsoe, Norway*
+
+*Tel: +47 48 89 30 43, email: benjamin.planque@hi.no, www.hi.no/en*
+
+RCaN is developped and maintained by Hilaire Drouineau and available from:
+https://github.com/inrae/RCaN
+
+## STEP 1 - Install and load librairies
+
+```{r installation & loading of librairies, echo=TRUE, results='hide'}
+#install.packages("symengine")
+#devtools::install_github("https://github.com/inrae/RCaN.git", subdir="RCaN")
+#install.packages("ggplot2")
+#install.packages("ggraph")
+#install.packages("coda")
+#install.packages("DT")
+#install.packages("tidyverse")
+
+require(symengine) # Symbolic math
+require(RCaN) # the RCaN library
+require(ggplot2) # plots
+require(ggraph) # network plots
+require(coda) # mcmc plotting
+require(DT) # to visualise data tables
+require(tidyverse) # get access to tidy syntax
+```
+
+## STEP 2 - load a RCaN file and build the corresponding model
+
+This is a simple model with two populations. The first feeds on an external food source. The second population predates on the first one.
+
+There are three explicit contraints:<br>
+1. the feeding rate should not exceed 100 <br>
+2. the biomass of population1 should not exceed observations*1.2 <br>
+3. the biomass of population1 should not be below observations/1.2 <br>
+To begin with, only the first constraint is active
+
+There several implicit constraints <br>
+1. the biomass of the populations should not go below the refuge biomass parameter <br>
+2. the feeding rates can not exceed satiation (sigma*biomass) <br>
+3. the relative change in population biomass from one year to the next is bounded by inertia (it cannot exceed exp(±mu))
+
+
+```{r build model1, echo=TRUE}
+rm(list=ls())
+CaNfile <- "./TwoSpeciesRCaN.xlsx"
+CaNmod <- buildCaN(CaNfile)
+
+```
+
+## STEP 3 - explore model elements
+
+```{r exploring elements, echo=TRUE}
+datatable(CaNmod$components_param[,1:8])
+datatable(CaNmod$fluxes_def)
+datatable(CaNmod$constraints)
+datatable(CaNmod$series)
+ggNetwork(CaNmod)
+```
+
+## STEP 4 - check that there can be solutions to this model
+"polytope OK" indicates that this model has multiple solutions. This is the desired situation :-)
+
+Other possibilities are  <br>
+"empty polytope"  <br>
+"polytope not bounded" <br> 
+"unique solution"  <br>
+"numerical error"  <br>
+"potential problem" 
+
+```{r check polytope status, echo=TRUE}
+checkPolytopeStatus(CaNmod)
+```
+## STEP 4b - Check the bounds (maximum and minimum) for all flows in the model (and biomasses at time t=1)
+```{r check polytope bounds, echo=TRUE,results='hide'}
+gab <- getAllBoundsParam(CaNmod)
+```
+```{r show polytope bounds, echo=TRUE}
+datatable(gab)
+```
+
+## STEP 5 - sample solutions to the model
+We use three sampling sequences (chains) and draw 1000 samples in each of them. The method used is the Gibbs sampler and there is no thining, i.e. all samples are kept.
+```{r sample the model, echo=TRUE, results='hide'}
+CaNsample <- sampleCaN(CaNmod,1000, nchain = 3, ncore = 3, method = "gibbs")
+```
+## STEP 6 - explore the results
+Plot the time series for the population <br>
+Plot the time series for the feeding <br>
+Check the sampling performance: are the distributions convex? are the chains autocorrelated?
+```{r explore results, echo=TRUE}
+Comp2plot <- CaNmod$species
+ggSeries(CaNsample,param = Comp2plot, plot_series = TRUE, ylab = 'Biomasses (1000t)')
+Flux2plot <- CaNmod$fluxes_def$Flux
+ggSeries(CaNsample,param = Flux2plot, plot_series = TRUE, ylab = 'fluxes (1000t/year)')
+CanNames <- attributes(CaNsample$mcmc[[1]])$dimnames[2]
+
+for(i in 1:4){
+  par(mfrow=c(2,2))
+  hist(CaNsample$mcmc[,i][[1]],breaks = 25,main = CanNames[[1]][i])
+  traceplot(CaNsample$mcmc[,i])
+  plot(autocorr(CaNsample$mcmc[,i:i][[1]],lags=1:25),type='l')
+  abline(h=0,col='red')
+}
+```
+
+Everything looks great aside from the autocorrelation in the sampling. It might be worth "thining" the sampling, i.e. discarding samples.
+
+## STEP 7 - revise the sampling
+Same sampling as above, but this time we apply a thining of 50, i.e. we only retain one every 50 samples.
+```{r sample the model 2, echo=TRUE, results='hide'}
+CaNsampleThin <- sampleCaN(CaNmod,1000, nchain = 3, ncore = 3, method = "gibbs", thin = 50)
+for(i in 1:4){
+  par(mfrow=c(2,2))
+  hist(CaNsampleThin$mcmc[,i][[1]],breaks = 25,main = CanNames[[1]][i])
+  traceplot(CaNsampleThin$mcmc[,i])
+  plot(autocorr(CaNsampleThin$mcmc[,i:i][[1]],lags=1:25),type='l')
+  abline(h=0,col='red')
+}
+```
+
+## STEP 8 - add constraints based on observations (C02 and C03)
+We now include information for observational time series on the biomass of species 1. 
+This is done by activating constraints C02 and C03 which state that the biomass trajectories sampled by RCaN should correspond to the observed biomasses /*1.2. <br>
+How does constraining the model on population 1 alters population 2 and the trophic flows?
+
+
+```{r toggle C03 and C04, echo=TRUE, results='hide'}
+CaNmod2 <- toggleConstraint(CaNmod,c("C02","C03"))
+datatable(CaNmod2$constraints)
+checkPolytopeStatus(CaNmod2)
+gab <- getAllBoundsParam(CaNmod2)
+datatable(gab[1:10,])
+CaNsample2 <- sampleCaN(CaNmod2,1000, nchain = 3, ncore = 3, method = "gibbs", thin = 50)
+ggSeries(CaNsample2,param = Comp2plot, plot_series = TRUE, ylab = 'Biomasses (1000t)')
+ggSeries(CaNsample2,param = Flux2plot, plot_series = TRUE, ylab = 'fluxes (1000t/year)')
+```
+
+```{r extra plot Flux1 vs Flux2, echo=FALSE}
+  # CaNsampleLong <- as_tibble(as.matrix(CaNsample$mcmc)) %>%
+  #   mutate(Sample_id = 1:dim(as.matrix(CaNsample$mcmc))[1]) %>%
+  #   pivot_longer(col = -Sample_id,
+  #                names_to = c("Var","Year"),
+  #                names_pattern = "(.*)\\[(.*)\\]",
+  #                values_to = 'value')
+  # CaNsampleWide2005 <- pivot_wider(CaNsampleLong, names_from = "Var") %>%
+  #   mutate(Year = as.numeric(Year)) %>%
+  #   filter(Year == 2005)
+  # ggplot(CaNsampleWide2005,aes(x=Food_Population1,y=Population1_Population2)) +
+  #   geom_point()
+```
